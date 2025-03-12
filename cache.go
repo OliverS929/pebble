@@ -4,7 +4,10 @@
 
 package pebble
 
-import "github.com/cockroachdb/pebble/internal/cache"
+import (
+	"github.com/cockroachdb/pebble/internal/cache"
+	"go.uber.org/zap"
+)
 
 // Cache exports the cache.Cache type.
 type Cache = cache.Cache
@@ -22,6 +25,6 @@ func NewCache(size int64) *cache.Cache {
 	return cache.New(size)
 }
 
-func NewCacheDebug(size int64, logger Logger) *cache.Cache {
-	return cache.New(size)
+func NewCacheDebug(size int64, logger zap.Logger) *cache.Cache {
+	return cache.NewDebug(size, logger)
 }

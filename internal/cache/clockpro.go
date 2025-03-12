@@ -28,6 +28,7 @@ import (
 
 	"github.com/cockroachdb/pebble/internal/base"
 	"github.com/cockroachdb/pebble/internal/invariants"
+	"go.uber.org/zap"
 )
 
 type fileKey struct {
@@ -110,7 +111,7 @@ type shard struct {
 	countCold int64
 	countTest int64
 
-	logger base.Logger
+	logger zap.Logger
 }
 
 func (c *shard) Get(id uint64, fileNum base.DiskFileNum, offset uint64) Handle {
@@ -827,7 +828,7 @@ func New(size int64) *Cache {
 	return newShards(size, m)
 }
 
-func NewDebug(size int64, logger base.Logger) *Cache {
+func NewDebug(size int64, logger zap.Logger) *Cache {
 	m := 4 * runtime.GOMAXPROCS(0)
 
 	const minimumShardSize = 4 << 20 // 4 MiB
@@ -874,7 +875,7 @@ func newShards(size int64, shards int) *Cache {
 	return c
 }
 
-func newShardsDebug(size int64, shards int, logger base.Logger) *Cache {
+func newShardsDebug(size int64, shards int, logger zap.Logger) *Cache {
 	c := &Cache{
 		maxSize: size,
 		shards:  make([]shard, shards),
