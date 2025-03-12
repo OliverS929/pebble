@@ -474,7 +474,10 @@ func (c *shard) metaAdd(key key, e *entry) bool {
 func (c *shard) metaAddDebug(key key, e *entry) bool {
 	c.evict()
 	if e.size > c.targetSize() {
-		c.logger.Info("metaAddDebug: entry cannot fit into cache with key %v and size %d", key, e.size)
+		c.logger.Info("metaAddDebug: entry cannot fit into cache",
+			zap.Any("key", key),
+			zap.Int64("size", e.size),
+		)
 		// The entry is larger than the target cache size.
 		return false
 	}
