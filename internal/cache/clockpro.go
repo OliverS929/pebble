@@ -109,6 +109,8 @@ type shard struct {
 	countHot  int64
 	countCold int64
 	countTest int64
+
+	logger base.Logger
 }
 
 func (c *shard) Get(id uint64, fileNum base.DiskFileNum, offset uint64) Handle {
@@ -187,6 +189,81 @@ func (c *shard) Set(id uint64, fileNum base.DiskFileNum, offset uint64, value *V
 		e.setValue(value)
 		e.ptype = etHot
 		if c.metaAdd(k, e) {
+			value.ref.trace("add-hot")
+			c.sizeHot += e.size
+			c.countHot++
+		} else {
+			value.ref.trace("skip-hot")
+			e.free()
+			e = nil
+		}
+	}
+
+	c.checkConsistency()
+
+	// Values are initialized with a reference count of 1. That reference count
+	// is being transferred to the returned Handle.
+	return Handle{value: value}
+}
+
+func (c *shard) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, value *Value) Handle {
+	if n := value.refs(); n != 1 {
+		panic(fmt.Sprintf("pebble: Value has already been added to the cache: refs=%d", n))
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	k := key{fileKey{id, fileNum}, offset}
+	e := c.blocks.Get(k)
+
+	switch {
+	case e == nil:
+		// no cache entry? add it
+		e = newEntry(c, k, int64(len(value.buf)))
+		e.setValue(value)
+		if c.metaAddDebug(k, e) {
+			value.ref.trace("add-cold")
+			c.sizeCold += e.size
+			c.countCold++
+		} else {
+			value.ref.trace("skip-cold")
+			e.free()
+			e = nil
+		}
+
+	case e.peekValue() != nil:
+		// cache entry was a hot or cold page
+		e.setValue(value)
+		e.referenced.Store(true)
+		delta := int64(len(value.buf)) - e.size
+		e.size = int64(len(value.buf))
+		if e.ptype == etHot {
+			value.ref.trace("add-hot")
+			c.sizeHot += delta
+		} else {
+			value.ref.trace("add-cold")
+			c.sizeCold += delta
+		}
+		c.evict()
+
+	default:
+		// cache entry was a test page
+		c.sizeTest -= e.size
+		c.countTest--
+		c.metaDel(e).release()
+		c.metaCheck(e)
+
+		e.size = int64(len(value.buf))
+		c.coldTarget += e.size
+		if c.coldTarget > c.targetSize() {
+			c.coldTarget = c.targetSize()
+		}
+
+		e.referenced.Store(false)
+		e.setValue(value)
+		e.ptype = etHot
+		if c.metaAddDebug(k, e) {
 			value.ref.trace("add-hot")
 			c.sizeHot += e.size
 			c.countHot++
@@ -360,6 +437,43 @@ func (c *shard) targetSize() int64 {
 func (c *shard) metaAdd(key key, e *entry) bool {
 	c.evict()
 	if e.size > c.targetSize() {
+		// The entry is larger than the target cache size.
+		return false
+	}
+
+	c.blocks.Put(key, e)
+	if entriesGoAllocated {
+		// Go allocated entries need to be referenced from Go memory. The entries
+		// map provides that reference.
+		c.entries[e] = struct{}{}
+	}
+
+	if c.handHot == nil {
+		// first element
+		c.handHot = e
+		c.handCold = e
+		c.handTest = e
+	} else {
+		c.handHot.link(e)
+	}
+
+	if c.handCold == c.handHot {
+		c.handCold = c.handCold.prev()
+	}
+
+	fkey := key.file()
+	if fileBlocks := c.files.Get(fkey); fileBlocks == nil {
+		c.files.Put(fkey, e)
+	} else {
+		fileBlocks.linkFile(e)
+	}
+	return true
+}
+
+func (c *shard) metaAddDebug(key key, e *entry) bool {
+	c.evict()
+	if e.size > c.targetSize() {
+		c.logger.Infof("metaAddDebug: entry cannot fit into cache with key %v and size %d", key, e.size)
 		// The entry is larger than the target cache size.
 		return false
 	}
@@ -713,6 +827,16 @@ func New(size int64) *Cache {
 	return newShards(size, m)
 }
 
+func NewDebug(size int64, logger base.Logger) *Cache {
+	m := 4 * runtime.GOMAXPROCS(0)
+
+	const minimumShardSize = 4 << 20 // 4 MiB
+	if m > 4 && int(size)/m < minimumShardSize {
+		m = 4
+	}
+	return newShardsDebug(size, m, logger)
+}
+
 func newShards(size int64, shards int) *Cache {
 	c := &Cache{
 		maxSize: size,
@@ -725,6 +849,44 @@ func newShards(size int64, shards int) *Cache {
 		c.shards[i] = shard{
 			maxSize:    size / int64(len(c.shards)),
 			coldTarget: size / int64(len(c.shards)),
+		}
+		if entriesGoAllocated {
+			c.shards[i].entries = make(map[*entry]struct{})
+		}
+		c.shards[i].blocks.init(16)
+		c.shards[i].files.init(16)
+	}
+
+	// Note: this is a no-op if invariants are disabled or race is enabled.
+	invariants.SetFinalizer(c, func(obj interface{}) {
+		c := obj.(*Cache)
+		if v := c.refs.Load(); v != 0 {
+			c.tr.Lock()
+			fmt.Fprintf(os.Stderr,
+				"pebble: cache (%p) has non-zero reference count: %d\n", c, v)
+			if len(c.tr.msgs) > 0 {
+				fmt.Fprintf(os.Stderr, "%s\n", strings.Join(c.tr.msgs, "\n"))
+			}
+			c.tr.Unlock()
+			os.Exit(1)
+		}
+	})
+	return c
+}
+
+func newShardsDebug(size int64, shards int, logger base.Logger) *Cache {
+	c := &Cache{
+		maxSize: size,
+		shards:  make([]shard, shards),
+	}
+	c.refs.Store(1)
+	c.idAlloc.Store(1)
+	c.trace("alloc", c.refs.Load())
+	for i := range c.shards {
+		c.shards[i] = shard{
+			maxSize:    size / int64(len(c.shards)),
+			coldTarget: size / int64(len(c.shards)),
+			logger:     logger,
 		}
 		if entriesGoAllocated {
 			c.shards[i].entries = make(map[*entry]struct{})
@@ -816,6 +978,10 @@ func (c *Cache) Get(id uint64, fileNum base.DiskFileNum, offset uint64) Handle {
 // lookup). The value must have been allocated by Cache.Alloc.
 func (c *Cache) Set(id uint64, fileNum base.DiskFileNum, offset uint64, value *Value) Handle {
 	return c.getShard(id, fileNum, offset).Set(id, fileNum, offset, value)
+}
+
+func (c *Cache) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, value *Value) Handle {
+	return c.getShard(id, fileNum, offset).SetDebug(id, fileNum, offset, value)
 }
 
 // Delete deletes the cached value for the specified file and offset.

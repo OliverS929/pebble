@@ -21,3 +21,7 @@ type Cache = cache.Cache
 func NewCache(size int64) *cache.Cache {
 	return cache.New(size)
 }
+
+func NewCacheDebug(size int64, logger Logger) *cache.Cache {
+	return cache.New(size)
+}
