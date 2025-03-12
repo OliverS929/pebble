@@ -111,7 +111,7 @@ type shard struct {
 	countCold int64
 	countTest int64
 
-	logger zap.Logger
+	logger *zap.Logger
 }
 
 func (c *shard) Get(id uint64, fileNum base.DiskFileNum, offset uint64) Handle {
@@ -474,10 +474,13 @@ func (c *shard) metaAdd(key key, e *entry) bool {
 func (c *shard) metaAddDebug(key key, e *entry) bool {
 	c.evict()
 	if e.size > c.targetSize() {
-		c.logger.Info("metaAddDebug: entry cannot fit into cache",
-			zap.Any("key", key),
-			zap.Int64("size", e.size),
-		)
+		if c.logger != nil {
+			c.logger.Info("metaAddDebug: entry cannot fit into cache",
+				zap.Any("key", key),
+				zap.Int64("size", e.size),
+				zap.Int64("target-size", c.targetSize()),
+			)
+		}
 		// The entry is larger than the target cache size.
 		return false
 	}
@@ -890,7 +893,7 @@ func newShardsDebug(size int64, shards int, logger zap.Logger) *Cache {
 		c.shards[i] = shard{
 			maxSize:    size / int64(len(c.shards)),
 			coldTarget: size / int64(len(c.shards)),
-			logger:     logger,
+			logger:     &logger,
 		}
 		if entriesGoAllocated {
 			c.shards[i].entries = make(map[*entry]struct{})
