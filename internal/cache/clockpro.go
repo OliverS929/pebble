@@ -232,6 +232,8 @@ func (c *shard) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, val
 	switch {
 	case e == nil:
 		// no cache entry? add it
+		fmt.Printf("%d %s SetDebug New Entry: id %d, fileNum %d, offset %d, entry size %d\n",
+			getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
 		e = newEntry(c, k, int64(len(value.buf)))
 		e.setValue(value)
 		if c.metaAddDebug(k, e) {
@@ -246,6 +248,8 @@ func (c *shard) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, val
 
 	case e.peekValue() != nil:
 		// cache entry was a hot or cold page
+		fmt.Printf("%d %s SetDebug Swap: id %d, fileNum %d, offset %d, entry size %d\n",
+			getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
 		e.setValue(value)
 		e.referenced.Store(true)
 		delta := int64(len(value.buf)) - e.size
@@ -261,6 +265,8 @@ func (c *shard) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, val
 
 	default:
 		// cache entry was a test page
+		fmt.Printf("%d %s SetDebug Remove-Add: id %d, fileNum %d, offset %d, entry size %d\n",
+			getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
 		c.sizeTest -= e.size
 		c.countTest--
 		c.metaDel(e).release()
@@ -486,8 +492,10 @@ func (c *shard) metaAddDebug(key key, e *entry) bool {
 	c.evict()
 	// fmt.Printf("%d %s metaAddDebug: Entering | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\nStack trace:\n%s\n",
 	// getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries), debug.Stack())
-	fmt.Printf("%d %s metaAddDebug: Entering | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\n",
-		getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries))
+	if c.maxSize > 0 {
+		fmt.Printf("%d %s metaAddDebug: Entering | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\n",
+			getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries))
+	}
 	if e.size > c.targetSize() {
 		// fmt.Printf("%d %s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\nStack trace:\n%s\n",
 		// getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, debug.Stack())
@@ -1041,8 +1049,8 @@ func (c *Cache) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, val
 		totalEntries += len(shard.entries)
 	}
 
-	fmt.Printf("%d %s SetDebug: cache-address: %p, cache-max-size: %d, cache-shard-len: %d, total-size-hot: %d, total-size-cold: %d, total-size-test: %d, total-count-hot: %d, total-count-cold: %d, total-count-test: %d, total-entries: %d, , total-allocated-size: %d\nStack trace:\n%s\n",
-		getGoroutineID(), time.Now().Format(time.RFC3339), c, c.maxSize, len(c.shards), totalSizeHot, totalSizeCold, totalSizeTest, totalCountHot, totalCountCold, totalCountTest, totalEntries, c.allocSize.Load(), debug.Stack())
+	fmt.Printf("%d %s SetDebug: cache-address: %p, cache-max-size: %d, cache-shard-len: %d, total-size-hot: %d, total-size-cold: %d, total-size-test: %d, total-count-hot: %d, total-count-cold: %d, total-count-test: %d, total-entries: %d, , total-allocated-size: %d, id %d, fileNum %d, offset %d \nStack trace:\n%s\n",
+		getGoroutineID(), time.Now().Format(time.RFC3339), c, c.maxSize, len(c.shards), totalSizeHot, totalSizeCold, totalSizeTest, totalCountHot, totalCountCold, totalCountTest, totalEntries, c.allocSize.Load(), id, fileNum, offset, debug.Stack())
 
 	return c.getShard(id, fileNum, offset).SetDebug(id, fileNum, offset, value)
 }
