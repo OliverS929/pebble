@@ -864,6 +864,8 @@ func NewDebug(size int64, logger zap.Logger) *Cache {
 		m = 4
 	}
 
+	m = 4 // force to have only 4 shard now for larger cache size per shard
+
 	fmt.Printf("NewDebug: shard-size: %d\n", m)
 
 	return newShardsDebug(size, m, logger)
