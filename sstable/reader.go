@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"sort"
 	"time"
 
@@ -1240,6 +1242,7 @@ func NewReader(f objstorage.Readable, o ReaderOptions, extraOpts ...ReaderOption
 	}
 	if r.opts.Cache == nil {
 		r.opts.Cache = cache.New(0)
+		fmt.Println("NewReader 0-size cache trace:\n" + string(debug.Stack()))
 	} else {
 		r.opts.Cache.Ref()
 	}
