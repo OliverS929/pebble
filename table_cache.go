@@ -433,6 +433,8 @@ func (c *tableCacheShard) newIters(
 	// decrement this straight away. Otherwise, we pass that responsibility to
 	// the sstable iterator, which decrements when it is closed.
 	v := c.findNode(file, dbOpts)
+	fmt.Printf("dbOpts: %+v\n", dbOpts)
+	fmt.Printf("Stack trace:\n%s\n", debug.Stack())
 	if v.err != nil {
 		defer c.unrefValue(v)
 		return nil, nil, v.err
