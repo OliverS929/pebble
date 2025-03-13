@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/pebble/internal/base"
 	"github.com/cockroachdb/pebble/internal/invariants"
@@ -473,10 +474,11 @@ func (c *shard) metaAdd(key key, e *entry) bool {
 
 func (c *shard) metaAddDebug(key key, e *entry) bool {
 	c.evict()
-	fmt.Printf("metaAddDebug: Entering\n")
+	fmt.Printf("%s metaAddDebug: Entering\n",
+		time.Now().Format(time.RFC3339))
 	if e.size > c.targetSize() {
-		fmt.Printf("metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\n",
-			key, e.size, c.targetSize(), c.maxSize, c.reservedSize)
+		fmt.Printf("%s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\nStack trace:\n%s\n",
+			time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, debug.Stack())
 		os.Stdout.Sync() // Flush immediately
 		if c.logger != nil {
 			c.logger.Info("metaAddDebug: entry cannot fit into cache",
@@ -515,6 +517,8 @@ func (c *shard) metaAddDebug(key key, e *entry) bool {
 	} else {
 		fileBlocks.linkFile(e)
 	}
+	fmt.Printf("%s metaAddDebug: Leaving\n",
+		time.Now().Format(time.RFC3339))
 	return true
 }
 
