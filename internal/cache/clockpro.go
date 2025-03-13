@@ -22,6 +22,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,15 @@ type fileKey struct {
 type key struct {
 	fileKey
 	offset uint64
+}
+
+// Helper function to get the goroutine ID
+func getGoroutineID() int {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
+	id, _ := strconv.Atoi(idField)
+	return id
 }
 
 // file returns the "file key" for the receiver. This is the key used for the
@@ -474,11 +484,11 @@ func (c *shard) metaAdd(key key, e *entry) bool {
 
 func (c *shard) metaAddDebug(key key, e *entry) bool {
 	c.evict()
-	fmt.Printf("%s metaAddDebug: Entering\n",
-		time.Now().Format(time.RFC3339))
+	fmt.Printf("%d %s metaAddDebug: Entering | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\nStack trace:\n%s\n",
+		getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries), debug.Stack())
 	if e.size > c.targetSize() {
-		fmt.Printf("%s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\nStack trace:\n%s\n",
-			time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, debug.Stack())
+		fmt.Printf("%d %s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\nStack trace:\n%s\n",
+			getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, debug.Stack())
 		os.Stdout.Sync() // Flush immediately
 		if c.logger != nil {
 			c.logger.Info("metaAddDebug: entry cannot fit into cache",
@@ -517,8 +527,8 @@ func (c *shard) metaAddDebug(key key, e *entry) bool {
 	} else {
 		fileBlocks.linkFile(e)
 	}
-	fmt.Printf("%s metaAddDebug: Leaving\n",
-		time.Now().Format(time.RFC3339))
+	fmt.Printf("%d %s metaAddDebug: Leaving | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\nStack trace:\n%s\n",
+		getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries), debug.Stack())
 	return true
 }
 
@@ -1000,7 +1010,28 @@ func (c *Cache) Set(id uint64, fileNum base.DiskFileNum, offset uint64, value *V
 }
 
 func (c *Cache) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, value *Value) Handle {
-	fmt.Printf("SetDebug: cache-address: %p, cache-max-size: %d, cache-shard-len: %d\n", c, c.maxSize, len(c.shards))
+	totalSizeHot := int64(0)
+	totalSizeCold := int64(0)
+	totalSizeTest := int64(0)
+	totalCountHot := int64(0)
+	totalCountCold := int64(0)
+	totalCountTest := int64(0)
+	totalEntries := 0
+
+	for i := range c.shards {
+		shard := &c.shards[i]
+		totalSizeHot += shard.sizeHot
+		totalSizeCold += shard.sizeCold
+		totalSizeTest += shard.sizeTest
+		totalCountHot += shard.countHot
+		totalCountCold += shard.countCold
+		totalCountTest += shard.countTest
+		totalEntries += len(shard.entries)
+	}
+
+	fmt.Printf("%d %s SetDebug: cache-address: %p, cache-max-size: %d, cache-shard-len: %d, total-size-hot: %d, total-size-cold: %d, total-size-test: %d, total-count-hot: %d, total-count-cold: %d, total-count-test: %d, total-entries: %d\nStack trace:\n%s\n",
+		getGoroutineID(), time.Now().Format(time.RFC3339), c, c.maxSize, len(c.shards), totalSizeHot, totalSizeCold, totalSizeTest, totalCountHot, totalCountCold, totalCountTest, totalEntries, debug.Stack())
+
 	return c.getShard(id, fileNum, offset).SetDebug(id, fileNum, offset, value)
 }
 
