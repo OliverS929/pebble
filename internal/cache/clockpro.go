@@ -996,6 +996,7 @@ func (c *Cache) Set(id uint64, fileNum base.DiskFileNum, offset uint64, value *V
 }
 
 func (c *Cache) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, value *Value) Handle {
+	fmt.Printf("SetDebug: cache-address: %p, cache-max-size: %d, cache-shard-len: %d\n", c, c.maxSize, len(c.shards))
 	return c.getShard(id, fileNum, offset).SetDebug(id, fileNum, offset, value)
 }
 
