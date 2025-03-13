@@ -1245,7 +1245,7 @@ func NewReader(f objstorage.Readable, o ReaderOptions, extraOpts ...ReaderOption
 		fmt.Println("NewReader 0-size cache trace:\n" + string(debug.Stack()))
 	} else {
 		r.opts.Cache.Ref()
-		fmt.Println("NewReader Cache Ref: %v trace:\n"+string(debug.Stack()), r.opts.Cache)
+		fmt.Printf("NewReader Cache Ref: %+v trace:\n%s\n", r.opts.Cache, string(debug.Stack()))
 	}
 
 	if f == nil {
