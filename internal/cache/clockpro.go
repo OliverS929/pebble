@@ -484,11 +484,15 @@ func (c *shard) metaAdd(key key, e *entry) bool {
 
 func (c *shard) metaAddDebug(key key, e *entry) bool {
 	c.evict()
-	fmt.Printf("%d %s metaAddDebug: Entering | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\nStack trace:\n%s\n",
-		getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries), debug.Stack())
+	// fmt.Printf("%d %s metaAddDebug: Entering | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\nStack trace:\n%s\n",
+	// getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries), debug.Stack())
+	fmt.Printf("%d %s metaAddDebug: Entering | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\n",
+		getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries))
 	if e.size > c.targetSize() {
-		fmt.Printf("%d %s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\nStack trace:\n%s\n",
-			getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, debug.Stack())
+		// fmt.Printf("%d %s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\nStack trace:\n%s\n",
+		// getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, debug.Stack())
+		fmt.Printf("%d %s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\n\n",
+			getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize)
 		os.Stdout.Sync() // Flush immediately
 		if c.logger != nil {
 			c.logger.Info("metaAddDebug: entry cannot fit into cache",
@@ -527,8 +531,8 @@ func (c *shard) metaAddDebug(key key, e *entry) bool {
 	} else {
 		fileBlocks.linkFile(e)
 	}
-	fmt.Printf("%d %s metaAddDebug: Leaving | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\nStack trace:\n%s\n",
-		getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries), debug.Stack())
+	fmt.Printf("%d %s metaAddDebug: Leaving | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\n\n",
+		getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries))
 	return true
 }
 
