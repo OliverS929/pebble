@@ -475,7 +475,7 @@ func (c *shard) metaAddDebug(key key, e *entry) bool {
 	c.evict()
 	fmt.Printf("metaAddDebug: Entering\n")
 	if e.size > c.targetSize() {
-		fmt.Printf("metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d\n, max-size: %d, reserved-size: %d",
+		fmt.Printf("metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\n",
 			key, e.size, c.targetSize(), c.maxSize, c.reservedSize)
 		os.Stdout.Sync() // Flush immediately
 		if c.logger != nil {
@@ -845,6 +845,9 @@ func NewDebug(size int64, logger zap.Logger) *Cache {
 	if m > 4 && int(size)/m < minimumShardSize {
 		m = 4
 	}
+
+	fmt.Printf("NewDebug: shard-size: %d\n", m)
+
 	return newShardsDebug(size, m, logger)
 }
 
@@ -893,6 +896,7 @@ func newShardsDebug(size int64, shards int, logger zap.Logger) *Cache {
 	c.refs.Store(1)
 	c.idAlloc.Store(1)
 	c.trace("alloc", c.refs.Load())
+	fmt.Printf("newShardsDebug: shard-max-size: %d\n", size/int64(len(c.shards)))
 	for i := range c.shards {
 		c.shards[i] = shard{
 			maxSize:    size / int64(len(c.shards)),
