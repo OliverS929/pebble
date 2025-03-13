@@ -232,8 +232,10 @@ func (c *shard) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, val
 	switch {
 	case e == nil:
 		// no cache entry? add it
-		fmt.Printf("%d %s SetDebug New Entry: id %d, fileNum %d, offset %d, entry size %d\n",
-			getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
+		if c.maxSize > 0 {
+			fmt.Printf("%d %s SetDebug New Entry: id %d, fileNum %d, offset %d, entry size %d\n",
+				getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
+		}
 		e = newEntry(c, k, int64(len(value.buf)))
 		e.setValue(value)
 		if c.metaAddDebug(k, e) {
@@ -248,8 +250,10 @@ func (c *shard) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, val
 
 	case e.peekValue() != nil:
 		// cache entry was a hot or cold page
-		fmt.Printf("%d %s SetDebug Swap: id %d, fileNum %d, offset %d, entry size %d\n",
-			getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
+		if c.maxSize > 0 {
+			fmt.Printf("%d %s SetDebug Swap: id %d, fileNum %d, offset %d, entry size %d\n",
+				getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
+		}
 		e.setValue(value)
 		e.referenced.Store(true)
 		delta := int64(len(value.buf)) - e.size
@@ -265,8 +269,10 @@ func (c *shard) SetDebug(id uint64, fileNum base.DiskFileNum, offset uint64, val
 
 	default:
 		// cache entry was a test page
-		fmt.Printf("%d %s SetDebug Remove-Add: id %d, fileNum %d, offset %d, entry size %d\n",
-			getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
+		if c.maxSize > 0 {
+			fmt.Printf("%d %s SetDebug Remove-Add: id %d, fileNum %d, offset %d, entry size %d\n",
+				getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
+		}
 		c.sizeTest -= e.size
 		c.countTest--
 		c.metaDel(e).release()

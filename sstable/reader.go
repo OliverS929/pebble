@@ -702,7 +702,9 @@ func (r *Reader) readBlockDebug(
 			v: cache.Alloc(int(bh.Length + blockTrailerLen)),
 		}
 		allocatedSize = int64(bh.Length + blockTrailerLen)
-		fmt.Printf("%d %s readBlockDebug compressed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, allocatedSize)
+		if r.opts.Cache.MaxSize() > 0 {
+			fmt.Printf("%d %s readBlockDebug compressed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, allocatedSize)
+		}
 	}
 
 	readStartTime := time.Now()
@@ -757,7 +759,9 @@ func (r *Reader) readBlockDebug(
 		} else {
 			decompressed = cacheValueOrBuf{v: cache.Alloc(decodedLen)}
 			allocatedSize = int64(decodedLen)
-			fmt.Printf("%d %s readBlockDebug decompressed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, decodedLen)
+			if r.opts.Cache.MaxSize() > 0 {
+				fmt.Printf("%d %s readBlockDebug decompressed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, decodedLen)
+			}
 		}
 		if _, err := decompressInto(typ, compressed.get()[prefixLen:], decompressed.get()); err != nil {
 			compressed.release()
@@ -781,7 +785,9 @@ func (r *Reader) readBlockDebug(
 		} else {
 			transformed = cacheValueOrBuf{v: cache.Alloc(len(tmpTransformed))}
 			allocatedSize = int64(len(tmpTransformed))
-			fmt.Printf("%d %s readBlockDebug transformed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, allocatedSize)
+			if r.opts.Cache.MaxSize() > 0 {
+				fmt.Printf("%d %s readBlockDebug transformed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, allocatedSize)
+			}
 
 		}
 		copy(transformed.get(), tmpTransformed)
