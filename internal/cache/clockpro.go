@@ -491,8 +491,10 @@ func (c *shard) metaAddDebug(key key, e *entry) bool {
 	if e.size > c.targetSize() {
 		// fmt.Printf("%d %s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\nStack trace:\n%s\n",
 		// getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, debug.Stack())
-		fmt.Printf("%d %s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\n\n",
-			getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize)
+		if c.maxSize > 0 {
+			fmt.Printf("%d %s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\n\n",
+				getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize)
+		}
 		os.Stdout.Sync() // Flush immediately
 		if c.logger != nil {
 			c.logger.Info("metaAddDebug: entry cannot fit into cache",
@@ -531,8 +533,8 @@ func (c *shard) metaAddDebug(key key, e *entry) bool {
 	} else {
 		fileBlocks.linkFile(e)
 	}
-	fmt.Printf("%d %s metaAddDebug: Leaving | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\n\n",
-		getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries))
+	// fmt.Printf("%d %s metaAddDebug: Leaving | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\n\n",
+	// getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries))
 	return true
 }
 
@@ -814,6 +816,8 @@ type Cache struct {
 		sync.Mutex
 		msgs []string
 	}
+
+	allocSize atomic.Int64
 }
 
 // New creates a new cache of the specified size. Memory for the cache is
@@ -873,8 +877,9 @@ func NewDebug(size int64, logger zap.Logger) *Cache {
 
 func newShards(size int64, shards int) *Cache {
 	c := &Cache{
-		maxSize: size,
-		shards:  make([]shard, shards),
+		maxSize:   size,
+		shards:    make([]shard, shards),
+		allocSize: atomic.Int64{},
 	}
 	c.refs.Store(1)
 	c.idAlloc.Store(1)
@@ -910,8 +915,9 @@ func newShards(size int64, shards int) *Cache {
 
 func newShardsDebug(size int64, shards int, logger zap.Logger) *Cache {
 	c := &Cache{
-		maxSize: size,
-		shards:  make([]shard, shards),
+		maxSize:   size,
+		shards:    make([]shard, shards),
+		allocSize: atomic.Int64{},
 	}
 	c.refs.Store(1)
 	c.idAlloc.Store(1)
@@ -1059,6 +1065,11 @@ func (c *Cache) EvictFile(id uint64, fileNum base.DiskFileNum) {
 // MaxSize returns the max size of the cache.
 func (c *Cache) MaxSize() int64 {
 	return c.maxSize
+}
+
+// MaxSize returns the max size of the cache.
+func (c *Cache) AllocSize() *atomic.Int64 { // Return *atomic.Int64
+	return &c.allocSize
 }
 
 // Size returns the current space used by the cache.

@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -30,6 +33,15 @@ import (
 
 var errCorruptIndexEntry = base.CorruptionErrorf("pebble/table: corrupt index entry")
 var errReaderClosed = errors.New("pebble/table: reader is closed")
+
+// Helper function to get the goroutine ID
+func getGoroutineID() int {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
+	id, _ := strconv.Atoi(idField)
+	return id
+}
 
 // decodeBlockHandle returns the block handle encoded at the start of src, as
 // well as the number of bytes it occupies. It returns zero if given invalid
@@ -679,6 +691,7 @@ func (r *Reader) readBlockDebug(
 		defer sema.Release(1)
 	}
 
+	var allocatedSize int64
 	var compressed cacheValueOrBuf
 	if bufferPool != nil {
 		compressed = cacheValueOrBuf{
@@ -688,6 +701,8 @@ func (r *Reader) readBlockDebug(
 		compressed = cacheValueOrBuf{
 			v: cache.Alloc(int(bh.Length + blockTrailerLen)),
 		}
+		allocatedSize = int64(bh.Length + blockTrailerLen)
+		fmt.Printf("%d %s readBlockDebug compressed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, allocatedSize)
 	}
 
 	readStartTime := time.Now()
@@ -741,6 +756,8 @@ func (r *Reader) readBlockDebug(
 			decompressed = cacheValueOrBuf{buf: bufferPool.Alloc(decodedLen)}
 		} else {
 			decompressed = cacheValueOrBuf{v: cache.Alloc(decodedLen)}
+			allocatedSize = int64(decodedLen)
+			fmt.Printf("%d %s readBlockDebug decompressed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, decodedLen)
 		}
 		if _, err := decompressInto(typ, compressed.get()[prefixLen:], decompressed.get()); err != nil {
 			compressed.release()
@@ -763,6 +780,9 @@ func (r *Reader) readBlockDebug(
 			transformed = cacheValueOrBuf{buf: bufferPool.Alloc(len(tmpTransformed))}
 		} else {
 			transformed = cacheValueOrBuf{v: cache.Alloc(len(tmpTransformed))}
+			allocatedSize = int64(len(tmpTransformed))
+			fmt.Printf("%d %s readBlockDebug transformed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, allocatedSize)
+
 		}
 		copy(transformed.get(), tmpTransformed)
 		decompressed.release()
@@ -772,6 +792,7 @@ func (r *Reader) readBlockDebug(
 	if decompressed.buf.Valid() {
 		return bufferHandle{b: decompressed.buf}, nil
 	}
+	r.opts.Cache.AllocSize().Add(allocatedSize)
 	h := r.opts.Cache.SetDebug(r.cacheID, r.fileNum, bh.Offset, decompressed.v)
 	return bufferHandle{h: h}, nil
 }
