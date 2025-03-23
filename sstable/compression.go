@@ -6,6 +6,8 @@ package sstable
 
 import (
 	"encoding/binary"
+	"fmt"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble/internal/base"
@@ -53,7 +55,7 @@ func decompressInto(blockType blockType, compressed []byte, buf []byte) ([]byte,
 }
 
 // decompressBlock decompresses an SST block, with space allocated from a cache.
-func decompressBlock(cache *cache.Cache, blockType blockType, b []byte) (*cache.Value, error) {
+func decompressBlock(cache *cache.Cache, blockType blockType, b []byte, print bool) (*cache.Value, error) {
 	if blockType == noCompressionBlockType {
 		return nil, nil
 	}
@@ -67,6 +69,11 @@ func decompressBlock(cache *cache.Cache, blockType blockType, b []byte) (*cache.
 	}
 	// Allocate sufficient space from the cache.
 	decoded := cache.Alloc(decodedLen)
+	if print {
+		if cache.MaxSize() > 0 {
+			fmt.Printf("%d %s readBlockDebug decompressed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), cache, decodedLen)
+		}
+	}
 	decodedBuf := decoded.Buf()
 	if _, err := decompressInto(blockType, b, decodedBuf); err != nil {
 		cache.Free(decoded)

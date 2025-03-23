@@ -22,9 +22,11 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/pebble/internal/base"
 	"github.com/cockroachdb/pebble/internal/invariants"
@@ -39,6 +41,15 @@ type fileKey struct {
 type key struct {
 	fileKey
 	offset uint64
+}
+
+// Helper function to get the goroutine ID
+func getGoroutineID() int {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
+	id, _ := strconv.Atoi(idField)
+	return id
 }
 
 // file returns the "file key" for the receiver. This is the key used for the
@@ -206,6 +217,96 @@ func (c *shard) Set(id uint64, fileNum base.FileNum, offset uint64, value *Value
 	return Handle{value: value}
 }
 
+func (c *shard) SetDebug(id uint64, fileNum base.FileNum, offset uint64, value *Value) Handle {
+	if n := value.refs(); n != 1 {
+		panic(fmt.Sprintf("pebble: Value has already been added to the cache: refs=%d", n))
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	k := key{fileKey{id, fileNum}, offset}
+	e := c.blocks.Get(k)
+
+	switch {
+	case e == nil:
+		// no cache entry? add it
+		if c.maxSize > 0 {
+			fmt.Printf("%d %s SetDebug New Entry: id %d, fileNum %d, offset %d, entry size %d\n",
+				getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
+		}
+
+		e = newEntry(c, k, int64(len(value.buf)))
+		e.setValue(value)
+		if c.metaAddDebug(k, e) {
+			value.ref.trace("add-cold")
+			c.sizeCold += e.size
+			c.countCold++
+		} else {
+			value.ref.trace("skip-cold")
+			e.free()
+			e = nil
+		}
+
+	case e.peekValue() != nil:
+		// cache entry was a hot or cold page
+		if c.maxSize > 0 {
+			fmt.Printf("%d %s SetDebug Swap: id %d, fileNum %d, offset %d, entry size %d\n",
+				getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
+		}
+
+		e.setValue(value)
+		atomic.StoreInt32(&e.referenced, 1)
+		delta := int64(len(value.buf)) - e.size
+		e.size = int64(len(value.buf))
+		if e.ptype == etHot {
+			value.ref.trace("add-hot")
+			c.sizeHot += delta
+		} else {
+			value.ref.trace("add-cold")
+			c.sizeCold += delta
+		}
+		c.evict()
+
+	default:
+		// cache entry was a test page
+		if c.maxSize > 0 {
+			fmt.Printf("%d %s SetDebug Remove-Add: id %d, fileNum %d, offset %d, entry size %d\n",
+				getGoroutineID(), time.Now().Format(time.RFC3339), id, fileNum, offset, len(value.buf))
+		}
+
+		c.sizeTest -= e.size
+		c.countTest--
+		c.metaDel(e)
+		c.metaCheck(e)
+
+		e.size = int64(len(value.buf))
+		c.coldTarget += e.size
+		if c.coldTarget > c.targetSize() {
+			c.coldTarget = c.targetSize()
+		}
+
+		atomic.StoreInt32(&e.referenced, 0)
+		e.setValue(value)
+		e.ptype = etHot
+		if c.metaAddDebug(k, e) {
+			value.ref.trace("add-hot")
+			c.sizeHot += e.size
+			c.countHot++
+		} else {
+			value.ref.trace("skip-hot")
+			e.free()
+			e = nil
+		}
+	}
+
+	c.checkConsistency()
+
+	// Values are initialized with a reference count of 1. That reference count
+	// is being transferred to the returned Handle.
+	return Handle{value: value}
+}
+
 func (c *shard) checkConsistency() {
 	// See the comment above the count{Hot,Cold,Test} fields.
 	switch {
@@ -325,6 +426,52 @@ func (c *shard) metaAdd(key key, e *entry) bool {
 	c.evict()
 	if e.size > c.targetSize() {
 		// The entry is larger than the target cache size.
+		return false
+	}
+
+	c.blocks.Put(key, e)
+	if entriesGoAllocated {
+		// Go allocated entries need to be referenced from Go memory. The entries
+		// map provides that reference.
+		c.entries[e] = struct{}{}
+	}
+
+	if c.handHot == nil {
+		// first element
+		c.handHot = e
+		c.handCold = e
+		c.handTest = e
+	} else {
+		c.handHot.link(e)
+	}
+
+	if c.handCold == c.handHot {
+		c.handCold = c.handCold.prev()
+	}
+
+	fkey := key.file()
+	if fileBlocks := c.files.Get(fkey); fileBlocks == nil {
+		c.files.Put(fkey, e)
+	} else {
+		fileBlocks.linkFile(e)
+	}
+	return true
+}
+
+func (c *shard) metaAddDebug(key key, e *entry) bool {
+	c.evict()
+	if c.maxSize > 0 {
+		fmt.Printf("%d %s metaAddDebug: Entering | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d, cold-target: %d, size-hot: %d, size-cold: %d, size-test: %d, count-hot: %d, count-cold: %d, count-test: %d, entries: %d\n",
+			getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize, c.coldTarget, c.sizeHot, c.sizeCold, c.sizeTest, c.countHot, c.countCold, c.countTest, len(c.entries))
+	}
+
+	if e.size > c.targetSize() {
+		// The entry is larger than the target cache size.
+		if c.maxSize > 0 {
+			fmt.Printf("%d %s metaAddDebug: entry cannot fit into cache | key: %v, size: %d, target-size: %d, max-size: %d, reserved-size: %d\n\n",
+				getGoroutineID(), time.Now().Format(time.RFC3339), key, e.size, c.targetSize(), c.maxSize, c.reservedSize)
+		}
+
 		return false
 	}
 
@@ -603,7 +750,7 @@ type Metrics struct {
 // efficient eviction of all of the blocks for a file which is used when an
 // sstable is deleted from disk.
 //
-// Memory Management
+// # Memory Management
 //
 // In order to reduce pressure on the Go GC, manual memory management is
 // performed for the data stored in the cache. Manual memory management is
@@ -631,6 +778,8 @@ type Cache struct {
 		sync.Mutex
 		msgs []string
 	}
+
+	allocSize atomic.Int64
 }
 
 // New creates a new cache of the specified size. Memory for the cache is
@@ -639,21 +788,66 @@ type Cache struct {
 // creator of the cache should usually release their reference after the DB is
 // created.
 //
-//   c := cache.New(...)
-//   defer c.Unref()
-//   d, err := pebble.Open(pebble.Options{Cache: c})
+//	c := cache.New(...)
+//	defer c.Unref()
+//	d, err := pebble.Open(pebble.Options{Cache: c})
 func New(size int64) *Cache {
 	return newShards(size, 2*runtime.GOMAXPROCS(0))
 }
 
+func NewDebug(size int64) *Cache {
+	fmt.Printf("NewDebug: shard-size: %d\n", 2*runtime.GOMAXPROCS(0))
+	return newShardsDebug(size, 2*runtime.GOMAXPROCS(0))
+}
+
 func newShards(size int64, shards int) *Cache {
 	c := &Cache{
-		refs:    1,
-		maxSize: size,
-		idAlloc: 1,
-		shards:  make([]shard, shards),
+		refs:      1,
+		maxSize:   size,
+		idAlloc:   1,
+		shards:    make([]shard, shards),
+		allocSize: atomic.Int64{},
 	}
 	c.trace("alloc", c.refs)
+	for i := range c.shards {
+		c.shards[i] = shard{
+			maxSize:    size / int64(len(c.shards)),
+			coldTarget: size / int64(len(c.shards)),
+		}
+		if entriesGoAllocated {
+			c.shards[i].entries = make(map[*entry]struct{})
+		}
+		c.shards[i].blocks.init(16)
+		c.shards[i].files.init(16)
+	}
+
+	// Note: this is a no-op if invariants are disabled or race is enabled.
+	invariants.SetFinalizer(c, func(obj interface{}) {
+		c := obj.(*Cache)
+		if v := atomic.LoadInt64(&c.refs); v != 0 {
+			c.tr.Lock()
+			fmt.Fprintf(os.Stderr,
+				"pebble: cache (%p) has non-zero reference count: %d\n", c, v)
+			if len(c.tr.msgs) > 0 {
+				fmt.Fprintf(os.Stderr, "%s\n", strings.Join(c.tr.msgs, "\n"))
+			}
+			c.tr.Unlock()
+			os.Exit(1)
+		}
+	})
+	return c
+}
+
+func newShardsDebug(size int64, shards int) *Cache {
+	c := &Cache{
+		refs:      1,
+		maxSize:   size,
+		idAlloc:   1,
+		shards:    make([]shard, shards),
+		allocSize: atomic.Int64{},
+	}
+	c.trace("alloc", c.refs)
+	fmt.Printf("%d %s newShardsDebug: shard-max-size: %d\nStack trace:\n%s\n", getGoroutineID(), time.Now().Format(time.RFC3339), size/int64(len(c.shards)), debug.Stack())
 	for i := range c.shards {
 		c.shards[i] = shard{
 			maxSize:    size / int64(len(c.shards)),
@@ -750,6 +944,34 @@ func (c *Cache) Set(id uint64, fileNum base.FileNum, offset uint64, value *Value
 	return c.getShard(id, fileNum, offset).Set(id, fileNum, offset, value)
 }
 
+func (c *Cache) SetDebug(id uint64, fileNum base.FileNum, offset uint64, value *Value) Handle {
+	totalSizeHot := int64(0)
+	totalSizeCold := int64(0)
+	totalSizeTest := int64(0)
+	totalCountHot := int64(0)
+	totalCountCold := int64(0)
+	totalCountTest := int64(0)
+	totalEntries := 0
+
+	for i := range c.shards {
+		shard := &c.shards[i]
+		totalSizeHot += shard.sizeHot
+		totalSizeCold += shard.sizeCold
+		totalSizeTest += shard.sizeTest
+		totalCountHot += shard.countHot
+		totalCountCold += shard.countCold
+		totalCountTest += shard.countTest
+		totalEntries += len(shard.entries)
+	}
+
+	if c.maxSize > 0 {
+		fmt.Printf("%d %s SetDebug: cache-address: %p, cache-max-size: %d, cache-shard-len: %d, total-size-hot: %d, total-size-cold: %d, total-size-test: %d, total-count-hot: %d, total-count-cold: %d, total-count-test: %d, total-entries: %d, , total-allocated-size: %d, total-cache-size: %d, id %d, fileNum %d, offset %d \nStack trace:\n%s\n",
+			getGoroutineID(), time.Now().Format(time.RFC3339), c, c.maxSize, len(c.shards), totalSizeHot, totalSizeCold, totalSizeTest, totalCountHot, totalCountCold, totalCountTest, totalEntries, c.allocSize.Load(), c.Size(), id, fileNum, offset, debug.Stack())
+	}
+
+	return c.getShard(id, fileNum, offset).SetDebug(id, fileNum, offset, value)
+}
+
 // Delete deletes the cached value for the specified file and offset.
 func (c *Cache) Delete(id uint64, fileNum base.FileNum, offset uint64) {
 	c.getShard(id, fileNum, offset).Delete(id, fileNum, offset)
@@ -768,6 +990,11 @@ func (c *Cache) EvictFile(id uint64, fileNum base.FileNum) {
 // MaxSize returns the max size of the cache.
 func (c *Cache) MaxSize() int64 {
 	return c.maxSize
+}
+
+// MaxSize returns the max size of the cache.
+func (c *Cache) AllocSize() *atomic.Int64 { // Return *atomic.Int64
+	return &c.allocSize
 }
 
 // Size returns the current space used by the cache.

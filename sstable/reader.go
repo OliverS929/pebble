@@ -10,8 +10,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
@@ -38,6 +43,15 @@ const (
 	initialReadaheadSize = 64 << 10  /* 64KB */
 	maxReadaheadSize     = 256 << 10 /* 256KB */
 )
+
+// Helper function to get the goroutine ID
+func getGoroutineID() int {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
+	id, _ := strconv.Atoi(idField)
+	return id
+}
 
 // decodeBlockHandle returns the block handle encoded at the start of src, as
 // well as the number of bytes it occupies. It returns zero if given invalid
@@ -2228,7 +2242,7 @@ func (r *Reader) NewRawRangeKeyIter() (FragmentIterator, error) {
 
 func (r *Reader) readIndex() (cache.Handle, error) {
 	h, _, err :=
-		r.readBlock(r.indexBH, nil /* transform */, nil /* readaheadState */)
+		r.readBlockDebug(r.indexBH, nil /* transform */, nil /* readaheadState */)
 	return h, err
 }
 
@@ -2337,7 +2351,7 @@ func (r *Reader) readBlock(
 	b = b[:bh.Length]
 	v.Truncate(len(b))
 
-	decoded, err := decompressBlock(r.opts.Cache, typ, b)
+	decoded, err := decompressBlock(r.opts.Cache, typ, b, false)
 	if decoded != nil {
 		r.opts.Cache.Free(v)
 		v = decoded
@@ -2363,6 +2377,108 @@ func (r *Reader) readBlock(
 	}
 
 	h := r.opts.Cache.Set(r.cacheID, r.fileNum, bh.Offset, v)
+	return h, false, nil
+}
+
+// readBlock reads and decompresses a block from disk into memory.
+func (r *Reader) readBlockDebug(
+	bh BlockHandle, transform blockTransform, raState *readaheadState,
+) (_ cache.Handle, cacheHit bool, _ error) {
+	if h := r.opts.Cache.Get(r.cacheID, r.fileNum, bh.Offset); h.Get() != nil {
+		if raState != nil {
+			raState.recordCacheHit(int64(bh.Offset), int64(bh.Length+blockTrailerLen))
+		}
+		return h, true, nil
+	}
+	file := r.file
+
+	if raState != nil {
+		if raState.sequentialFile != nil {
+			file = raState.sequentialFile
+		} else if readaheadSize := raState.maybeReadahead(int64(bh.Offset), int64(bh.Length+blockTrailerLen)); readaheadSize > 0 {
+			if readaheadSize >= maxReadaheadSize {
+				// We've reached the maximum readahead size. Beyond this
+				// point, rely on OS-level readahead. Note that we can only
+				// reopen a new file handle with this optimization if
+				// r.fs != nil. This reader must have been created with the
+				// FileReopenOpt for this field to be set.
+				if r.fs != nil {
+					f, err := r.fs.Open(r.filename, vfs.SequentialReadsOption)
+					if err == nil {
+						// Use this new file handle for all sequential reads by
+						// this iterator going forward.
+						raState.sequentialFile = f
+						file = f
+					}
+
+					// If we tried to load a table that doesn't exist, panic
+					// immediately.  Something is seriously wrong if a table
+					// doesn't exist.
+					// See cockroachdb/cockroach#56490.
+					base.MustExist(r.fs, r.filename, panicFataler{}, err)
+				}
+			}
+			if raState.sequentialFile == nil {
+				type fd interface {
+					Fd() uintptr
+				}
+				if f, ok := r.file.(fd); ok {
+					_ = vfs.Prefetch(f.Fd(), bh.Offset, uint64(readaheadSize))
+				}
+			}
+		}
+	}
+
+	v := r.opts.Cache.Alloc(int(bh.Length + blockTrailerLen))
+	b := v.Buf()
+	if r.opts.Cache.MaxSize() > 0 {
+		fmt.Printf("%d %s readBlockDebug compressed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, int(bh.Length+blockTrailerLen))
+	}
+
+	if _, err := file.ReadAt(b, int64(bh.Offset)); err != nil {
+		r.opts.Cache.Free(v)
+		return cache.Handle{}, false, err
+	}
+
+	if err := checkChecksum(r.checksumType, b, bh, r.fileNum); err != nil {
+		r.opts.Cache.Free(v)
+		return cache.Handle{}, false, err
+	}
+
+	typ := blockType(b[bh.Length])
+	b = b[:bh.Length]
+	v.Truncate(len(b))
+
+	decoded, err := decompressBlock(r.opts.Cache, typ, b, true)
+	if decoded != nil {
+		r.opts.Cache.Free(v)
+		v = decoded
+		b = v.Buf()
+	} else if err != nil {
+		r.opts.Cache.Free(v)
+		return cache.Handle{}, false, err
+	}
+
+	if transform != nil {
+		// Transforming blocks is rare, so the extra copy of the transformed data
+		// is not problematic.
+		var err error
+		b, err = transform(b)
+		if err != nil {
+			r.opts.Cache.Free(v)
+			return cache.Handle{}, false, err
+		}
+		newV := r.opts.Cache.Alloc(len(b))
+		if r.opts.Cache.MaxSize() > 0 {
+			fmt.Printf("%d %s readBlockDebug transformed: cache-address: %p, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, len(b))
+		}
+
+		copy(newV.Buf(), b)
+		r.opts.Cache.Free(v)
+		v = newV
+	}
+
+	h := r.opts.Cache.SetDebug(r.cacheID, r.fileNum, bh.Offset, v)
 	return h, false, nil
 }
 
@@ -2762,6 +2878,7 @@ func NewReader(f ReadableFile, o ReaderOptions, extraOpts ...ReaderOption) (*Rea
 		r.opts.Cache = cache.New(0)
 	} else {
 		r.opts.Cache.Ref()
+		fmt.Printf("%s NewReader Cache max-size: %d trace:\n%s\n", time.Now().Format(time.RFC3339), r.opts.Cache.MaxSize(), debug.Stack())
 	}
 
 	if f == nil {
