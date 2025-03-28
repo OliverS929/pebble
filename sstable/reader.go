@@ -8,9 +8,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -28,6 +33,15 @@ import (
 
 var errCorruptIndexEntry = base.CorruptionErrorf("pebble/table: corrupt index entry")
 var errReaderClosed = errors.New("pebble/table: reader is closed")
+
+// Helper function to get the goroutine ID
+func getGoroutineID() int {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
+	id, _ := strconv.Atoi(idField)
+	return id
+}
 
 // decodeBlockHandle returns the block handle encoded at the start of src, as
 // well as the number of bytes it occupies. It returns zero if given invalid
@@ -444,7 +458,7 @@ func (r *Reader) readIndex(
 	ctx context.Context, stats *base.InternalIteratorStats,
 ) (bufferHandle, error) {
 	ctx = objiotracing.WithBlockType(ctx, objiotracing.MetadataBlock)
-	return r.readBlock(ctx, r.indexBH, nil, nil, stats, nil /* buffer pool */)
+	return r.readBlockDebug(ctx, r.indexBH, nil, nil, stats, nil /* buffer pool */)
 }
 
 func (r *Reader) readFilter(
@@ -642,6 +656,153 @@ func (r *Reader) readBlock(
 		return bufferHandle{b: decompressed.buf}, nil
 	}
 	h := r.opts.Cache.Set(r.cacheID, r.fileNum, bh.Offset, decompressed.v)
+	return bufferHandle{h: h}, nil
+}
+
+func (r *Reader) readBlockDebug(
+	ctx context.Context,
+	bh BlockHandle,
+	transform blockTransform,
+	readHandle objstorage.ReadHandle,
+	stats *base.InternalIteratorStats,
+	bufferPool *BufferPool,
+) (handle bufferHandle, _ error) {
+	if h := r.opts.Cache.Get(r.cacheID, r.fileNum, bh.Offset); h.Get() != nil {
+		// Cache hit.
+		if r.opts.Cache.MaxSize() > 0 {
+			fmt.Printf("%d %s readBlockDebug Cache Hit: cache-address: %p, cache id %d, fileNum %d, Offset %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, r.cacheID, r.fileNum, bh.Offset)
+		}
+		if readHandle != nil {
+			readHandle.RecordCacheHit(ctx, int64(bh.Offset), int64(bh.Length+blockTrailerLen))
+		}
+		if stats != nil {
+			stats.BlockBytes += bh.Length
+			stats.BlockBytesInCache += bh.Length
+		}
+		// This block is already in the cache; return a handle to existing vlaue
+		// in the cache.
+		return bufferHandle{h: h}, nil
+	}
+
+	// Cache miss.
+
+	if sema := r.opts.LoadBlockSema; sema != nil {
+		if err := sema.Acquire(ctx, 1); err != nil {
+			// An error here can only come from the context.
+			return bufferHandle{}, err
+		}
+		defer sema.Release(1)
+	}
+
+	var allocatedSize int64
+	var compressed cacheValueOrBuf
+	if bufferPool != nil {
+		compressed = cacheValueOrBuf{
+			buf: bufferPool.Alloc(int(bh.Length + blockTrailerLen)),
+		}
+	} else {
+		compressed = cacheValueOrBuf{
+			v: cache.Alloc(int(bh.Length + blockTrailerLen)),
+		}
+		allocatedSize = int64(bh.Length + blockTrailerLen)
+		if r.opts.Cache.MaxSize() > 0 {
+			fmt.Printf("%d %s readBlockDebug compressed: cache-address: %p, cache id %d, fileNum %d, Offset %d, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, r.cacheID, r.fileNum, bh.Offset, allocatedSize)
+		}
+	}
+
+	readStartTime := time.Now()
+	var err error
+	if readHandle != nil {
+		err = readHandle.ReadAt(ctx, compressed.get(), int64(bh.Offset))
+	} else {
+		err = r.readable.ReadAt(ctx, compressed.get(), int64(bh.Offset))
+	}
+	readDuration := time.Since(readStartTime)
+	// TODO(sumeer): should the threshold be configurable.
+	const slowReadTracingThreshold = 5 * time.Millisecond
+	// The invariants.Enabled path is for deterministic testing.
+	if invariants.Enabled {
+		readDuration = slowReadTracingThreshold
+	}
+	// Call IsTracingEnabled to avoid the allocations of boxing integers into an
+	// interface{}, unless necessary.
+	if readDuration >= slowReadTracingThreshold && r.opts.LoggerAndTracer.IsTracingEnabled(ctx) {
+		r.opts.LoggerAndTracer.Eventf(ctx, "reading %d bytes took %s",
+			int(bh.Length+blockTrailerLen), readDuration.String())
+	}
+	if stats != nil {
+		stats.BlockBytes += bh.Length
+		stats.BlockReadDuration += readDuration
+	}
+	if err != nil {
+		compressed.release()
+		return bufferHandle{}, err
+	}
+	if err := checkChecksum(r.checksumType, compressed.get(), bh, r.fileNum.FileNum()); err != nil {
+		compressed.release()
+		return bufferHandle{}, err
+	}
+
+	typ := blockType(compressed.get()[bh.Length])
+	compressed.truncate(int(bh.Length))
+
+	var decompressed cacheValueOrBuf
+	if typ == noCompressionBlockType {
+		decompressed = compressed
+	} else {
+		// Decode the length of the decompressed value.
+		decodedLen, prefixLen, err := decompressedLen(typ, compressed.get())
+		if err != nil {
+			compressed.release()
+			return bufferHandle{}, err
+		}
+
+		if bufferPool != nil {
+			decompressed = cacheValueOrBuf{buf: bufferPool.Alloc(decodedLen)}
+		} else {
+			decompressed = cacheValueOrBuf{v: cache.Alloc(decodedLen)}
+			allocatedSize = int64(decodedLen)
+			if r.opts.Cache.MaxSize() > 0 {
+				fmt.Printf("%d %s readBlockDebug decompressed: cache-address: %p, cache id %d, fileNum %d, Offset %d, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, r.cacheID, r.fileNum, bh.Offset, allocatedSize)
+			}
+		}
+		if _, err := decompressInto(typ, compressed.get()[prefixLen:], decompressed.get()); err != nil {
+			compressed.release()
+			return bufferHandle{}, err
+		}
+		compressed.release()
+	}
+
+	if transform != nil {
+		// Transforming blocks is very rare, so the extra copy of the
+		// transformed data is not problematic.
+		tmpTransformed, err := transform(decompressed.get())
+		if err != nil {
+			decompressed.release()
+			return bufferHandle{}, err
+		}
+
+		var transformed cacheValueOrBuf
+		if bufferPool != nil {
+			transformed = cacheValueOrBuf{buf: bufferPool.Alloc(len(tmpTransformed))}
+		} else {
+			transformed = cacheValueOrBuf{v: cache.Alloc(len(tmpTransformed))}
+			allocatedSize = int64(len(tmpTransformed))
+			if r.opts.Cache.MaxSize() > 0 {
+				fmt.Printf("%d %s readBlockDebug transformed: cache-address: %p, cache id %d, fileNum %d, Offset %d, allocate space %d\n", getGoroutineID(), time.Now().Format(time.RFC3339), r.opts.Cache, r.cacheID, r.fileNum, bh.Offset, allocatedSize)
+			}
+		}
+		copy(transformed.get(), tmpTransformed)
+		decompressed.release()
+		decompressed = transformed
+	}
+
+	if decompressed.buf.Valid() {
+		return bufferHandle{b: decompressed.buf}, nil
+	}
+
+	r.opts.Cache.AllocSize().Add(allocatedSize)
+	h := r.opts.Cache.SetDebug(r.cacheID, r.fileNum, bh.Offset, decompressed.v)
 	return bufferHandle{h: h}, nil
 }
 
@@ -1113,6 +1274,7 @@ func NewReader(f objstorage.Readable, o ReaderOptions, extraOpts ...ReaderOption
 		r.opts.Cache = cache.New(0)
 	} else {
 		r.opts.Cache.Ref()
+		fmt.Printf("%s NewReader Cache max-size: %d trace:\n%s\n", time.Now().Format(time.RFC3339), r.opts.Cache.MaxSize(), debug.Stack())
 	}
 
 	if f == nil {
